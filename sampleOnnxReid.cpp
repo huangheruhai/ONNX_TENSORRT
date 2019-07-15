@@ -14,13 +14,17 @@
 #include "argsParser.h"
 #include "logger.h"
 #include "common.h"
+#include "opencv2/opencv.hpp"
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include <cmath>
 using namespace nvinfer1;
 
-static const int INPUT_H = 28;
-static const int INPUT_W = 28;
-static const int OUTPUT_SIZE = 10;
+static const int INPUT_H = 384;
+static const int INPUT_W = 128;
+static const int OUTPUT_SIZE = 3328;
 
-const std::string gSampleName = "TensorRT.sample_onnx_mnist";
+const std::string gSampleName = "TensorRT.onnx_reid";
 
 samplesCommon::Args gArgs;
 
@@ -122,7 +126,7 @@ void doInference(IExecutionContext& context, float* input, float* output, int ba
 //!
 void printHelpInfo()
 {
-    std::cout << "Usage: ./sample_onnx_mnist [-h or --help] [-d or --datadir=<path to data directory>] [--useDLACore=<int>]\n";
+    std::cout << "Usage: ./onnx_reid [-h or --help] [-d or --datadir=<path to data directory>] [--useDLACore=<int>]\n";
     std::cout << "--help          Display help information\n";
     std::cout << "--datadir       Specify path to a data directory, overriding the default. This option can be used multiple times to add multiple directories. If no data directories are given, the default is to use (data/samples/mnist/, data/mnist/)" << std::endl;
     std::cout << "--useDLACore=N  Specify a DLA engine for layers that support DLA. Value can range from 0 to n-1, where n is the number of DLA engines on the platform." << std::endl;
@@ -156,26 +160,56 @@ int main(int argc, char** argv)
     // create a TensorRT model from the onnx model and serialize it to a stream
     IHostMemory* trtModelStream{nullptr};
 
-    if (!onnxToTRTModel("mnist.onnx", 1, trtModelStream))
+    if (!onnxToTRTModel("onnx_reid.onnx", 16, trtModelStream))
         gLogger.reportFail(sampleTest);
 
     assert(trtModelStream != nullptr);
 
-    // read a random digit file
-    srand(unsigned(time(nullptr)));
-    uint8_t fileData[INPUT_H * INPUT_W];
-    int num = rand() % 10;
-    readPGMFile(locateFile(std::to_string(num) + ".pgm", gArgs.dataDirs), fileData);
+//    // read a random digit file
+//    srand(unsigned(time(nullptr)));
+//    uint8_t fileData[INPUT_H * INPUT_W];
+//    int num = rand() % 10;
+//    readPGMFile(locateFile(std::to_string(num) + ".pgm", gArgs.dataDirs), fileData);
 
-    // print an ascii representation
-    gLogInfo << "Input:\n";
-    for (int i = 0; i < INPUT_H * INPUT_W; i++)
-        gLogInfo << (" .:-=+*#%@"[fileData[i] / 26]) << (((i + 1) % INPUT_W) ? "" : "\n");
-    gLogInfo << std::endl;
+    cv::Mat image;
+    image=cv:imread("./test.jpg",1);
+    cv::resize(image,image,cv::Size(128,384));
+    cv::cvtColor(image,image,CV_BGR2RGB);
+    cv::Mat image_float;
+    image.convertTo(image_float,CV_32FC3,1.0/255);
+    cv::subtract(image_float,cv::Scalar(0.485,0.456,0.406),image_float);
+    cv::multiply(image_float,cv::Scalar(1.0/0.229,1.0/0.224,1.0/0.225),image_float);
 
-    float data[INPUT_H * INPUT_W];
-    for (int i = 0; i < INPUT_H * INPUT_W; i++)
-        data[i] = 1.0 - float(fileData[i] / 255.0);
+
+
+//    // print an ascii representation
+//    gLogInfo << "Input:\n";
+//    for (int i = 0; i < INPUT_H * INPUT_W; i++)
+//        gLogInfo << (" .:-=+*#%@"[fileData[i] / 26]) << (((i + 1) % INPUT_W) ? "" : "\n");
+//    gLogInfo << std::endl;
+//
+//    float data[INPUT_H * INPUT_W];
+//    for (int i = 0; i < INPUT_H * INPUT_W; i++)
+//        data[i] = 1.0 - float(fileData[i] / 255.0);
+
+    const int N=10;
+    float *data=new foat[N*3*INPUT_H * INPUT_W];
+    for (int i=0, volImg=3*INPUT_H * INPUT_W;i<N;++i){
+        for (int c=0;c<3;++c){
+          for( int j=0;j<INPUT_H;++j){
+            for (int k=0;k<INPUT_W;++k){
+              data[i*volImg+c*INPUT_H*INPUT_W+j*INPUT_W+k]=image_float.at<Vec3f>(j,k)[c];
+
+            }
+
+          }
+
+        }
+
+
+    }
+
+
 
     // deserialize the engine
     IRuntime* runtime = createInferRuntime(gLogger);
@@ -191,39 +225,50 @@ int main(int argc, char** argv)
     IExecutionContext* context = engine->createExecutionContext();
     assert(context != nullptr);
     // run inference
-    float prob[OUTPUT_SIZE];
-    doInference(*context, data, prob, 1);
+    float prob[OUTPUT_SIZE*N];
 
+    auto startTime =std::chrono::high_resolution_clock::now()
+
+    doInference(*context, data, prob, N);
+    auto endTime=std::chrono::high_resolution_clock::now()
+
+    float totalTime=std::chrono::duration<float,std::milli>(endTime-startTime).count();
+
+    for(const auto&e : prob){
+
+    std::cout<<e<<", ";
+
+    }
     // destroy the engine
     context->destroy();
     engine->destroy();
     runtime->destroy();
 
-    float val{0.0f};
-    int idx{0};
-
-    //Calculate Softmax
-    float sum{0.0f};
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-    {
-        prob[i] = exp(prob[i]);
-        sum += prob[i];
-    }
-
-    gLogInfo << "Output:\n";
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-    {
-        prob[i] /= sum;
-        val = std::max(val, prob[i]);
-        if (val == prob[i])
-            idx = i;
-
-        gLogInfo << " Prob " << i << "  " << std::fixed << std::setw(5) << std::setprecision(4) << prob[i] << " "
-                 << "Class " << i << ": " << std::string(int(std::floor(prob[i] * 10 + 0.5f)), '*') << "\n";
-    }
-    gLogInfo << std::endl;
-
-    bool pass{idx == num && val > 0.9f};
+//    float val{0.0f};
+//    int idx{0};
+//
+//    //Calculate Softmax
+//    float sum{0.0f};
+//    for (int i = 0; i < OUTPUT_SIZE; i++)
+//    {
+//        prob[i] = exp(prob[i]);
+//        sum += prob[i];
+//    }
+//
+//    gLogInfo << "Output:\n";
+//    for (int i = 0; i < OUTPUT_SIZE; i++)
+//    {
+//        prob[i] /= sum;
+//        val = std::max(val, prob[i]);
+//        if (val == prob[i])
+//            idx = i;
+//
+//        gLogInfo << " Prob " << i << "  " << std::fixed << std::setw(5) << std::setprecision(4) << prob[i] << " "
+//                 << "Class " << i << ": " << std::string(int(std::floor(prob[i] * 10 + 0.5f)), '*') << "\n";
+//    }
+//    gLogInfo << std::endl;
+//
+//    bool pass{idx == num && val > 0.9f};
 
     return gLogger.reportTest(sampleTest, pass);
 }
